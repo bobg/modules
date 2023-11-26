@@ -1,9 +1,11 @@
 package modules
 
 import (
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 
 	"github.com/bobg/errors"
@@ -21,21 +23,35 @@ func Each(dir string, f func(string) error) error {
 	return w.Each(dir, f)
 }
 
-// Walker is a controller for Each and EachGomod.
-// The zero value is a default, valid walker.
+// Walker is a controller for various methods that walk a directory tree of Go modules.
+// The zero value is a valid walker.
 type Walker struct {
 	IncludeVendor   bool // If true, walk into vendor directories. If false, skip them.
 	IncludeTestdata bool // If true, walk into testdata directories. If false, skip them.
 
-	// These fields are used by EachGomod (and LoadEachGomod).
-	ParseLax    bool                 // Use [modfile.ParseLax] to parse go.mod files instead of [modfile.Parse].
-	VesionFixer modfile.VersionFixer // Use this version-string fixing function when parsing go.mod files.
+	// The following fields are used by EachGomod and LoadEachGomod.
 
-	// These fields are used by LoadEach (and LoadEachGomod).
-	LoadMode            packages.LoadMode // The mode to pass to [packages.Load]. If this is zero, a default value of [LoadMode] is used.
-	LoadTests           bool              // The tests flag to pass to [packages.Load].
-	FailOnPackageErrors bool              // If true, return an error if any package fails to load.
+	ParseLax     bool                 // Use [modfile.ParseLax] to parse go.mod files instead of [modfile.Parse].
+	VersionFixer modfile.VersionFixer // Use this version-string fixing function when parsing go.mod files.
+
+	// The following fields are used by LoadEach and LoadEachGomod.
+
+	// This is the config to pass to [packages.Load]
+	// when loading packages in [Walker.LoadEach] and [Walker.LoadEachGomod].
+	// If this is the zero config,
+	// a default value of [DefaultLoadConfig] is used.
+	// If this is not the zero config but LoadConfig.Mode is zero,
+	// a default value of [LoadMode] is used.
+	// The Dir field of the config is set to the directory passed to [Walker.LoadEach] or [Walker.LoadEachGomod].
+	LoadConfig          packages.Config
+	FailOnPackageErrors bool // If true, return an error if any package fails to load.
 }
+
+var zeroLoadConfig packages.Config
+
+const LoadMode = packages.NeedName | packages.NeedFiles | packages.NeedImports | packages.NeedDeps | packages.NeedTypes | packages.NeedSyntax | packages.NeedTypesInfo | packages.NeedTypesSizes | packages.NeedModule | packages.NeedEmbedFiles | packages.NeedEmbedPatterns
+
+var DefaultLoadConfig = packages.Config{Mode: LoadMode}
 
 // Each calls f for each Go module in dir and its subdirectories.
 // A Go module is identified by the presence of a go.mod file.
@@ -125,9 +141,9 @@ func (w *Walker) withGomod(dir, subdir string, f func(string, *modfile.File) err
 
 	var mf *modfile.File
 	if w.ParseLax {
-		mf, err = modfile.ParseLax(gomodPath, data, w.VesionFixer)
+		mf, err = modfile.ParseLax(gomodPath, data, w.VersionFixer)
 	} else {
-		mf, err = modfile.Parse(gomodPath, data, w.VesionFixer)
+		mf, err = modfile.Parse(gomodPath, data, w.VersionFixer)
 	}
 	if err != nil {
 		return errors.Wrapf(err, "parsing %s", gomodPath)
@@ -141,22 +157,18 @@ func LoadEach(dir string, f func(string, []*packages.Package) error) error {
 	return w.LoadEach(dir, f)
 }
 
-// LoadMode is a default value for Walker.LoadMode when unspecified.
-const LoadMode = packages.NeedName | packages.NeedFiles | packages.NeedImports | packages.NeedDeps | packages.NeedTypes | packages.NeedSyntax | packages.NeedTypesInfo | packages.NeedTypesSizes | packages.NeedModule | packages.NeedEmbedFiles | packages.NeedEmbedPatterns
-
 func (w *Walker) LoadEach(dir string, f func(string, []*packages.Package) error) error {
-	loadMode := w.LoadMode
-	if loadMode == 0 {
-		loadMode = LoadMode
+	conf := w.LoadConfig
+	if isZeroConfig(conf) {
+		conf = DefaultLoadConfig
 	}
+	if conf.Mode == 0 {
+		conf.Mode = LoadMode
+	}
+	conf.Dir = dir
 
 	return w.Each(dir, func(subdir string) error {
-		conf := &packages.Config{
-			Dir:   subdir,
-			Mode:  w.LoadMode,
-			Tests: w.LoadTests,
-		}
-		pkgs, err := packages.Load(conf, "./...")
+		pkgs, err := packages.Load(&conf, "./...")
 		if err != nil {
 			return errors.Wrapf(err, "loading packages in %s", subdir)
 		}
@@ -165,7 +177,7 @@ func (w *Walker) LoadEach(dir string, f func(string, []*packages.Package) error)
 			var err error
 			for _, pkg := range pkgs {
 				for _, pkgErr := range pkg.Errors {
-					err = errors.Join(err, errors.Wrapf(pkgErr, "loading package %s", pkg.PkgPath))
+					err = errors.Join(err, PackageLoadError{PkgPath: pkg.PkgPath, Err: pkgErr})
 				}
 			}
 			if err != nil {
@@ -175,6 +187,23 @@ func (w *Walker) LoadEach(dir string, f func(string, []*packages.Package) error)
 
 		return f(subdir, pkgs)
 	})
+}
+
+func isZeroConfig(conf packages.Config) bool {
+	return reflect.DeepEqual(conf, zeroLoadConfig) // Can't use == because packages.Config contains function pointers.
+}
+
+type PackageLoadError struct {
+	PkgPath string
+	Err     error
+}
+
+func (e PackageLoadError) Error() string {
+	return fmt.Sprintf("loading %s: %s", e.PkgPath, e.Err)
+}
+
+func (e PackageLoadError) Unwrap() error {
+	return e.Err
 }
 
 // LoadEachGomod combines LoadEach and EachGomod.
