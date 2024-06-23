@@ -26,32 +26,42 @@ func Each(dir string, f func(string) error) error {
 // Walker is a controller for various methods that walk a directory tree of Go modules.
 // The zero value is a valid walker.
 type Walker struct {
-	IncludeVendor   bool // If true, walk into vendor directories. If false, skip them.
-	IncludeTestdata bool // If true, walk into testdata directories. If false, skip them.
+	// IncludeVendor controls whether to walk into vendor directories.
+	IncludeVendor bool
 
-	// The following fields are used by EachGomod and LoadEachGomod.
+	// IncludeTestdata controls whether to walk into testdata directories.
+	IncludeTestdata bool
 
-	ParseLax     bool                 // Use [modfile.ParseLax] to parse go.mod files instead of [modfile.Parse].
+	// The following fields are used by [EachGomod] and [LoadEachGomod].
+
+	// ParseLax controls whether to use [modfile.ParseLax] instead of [modfile.Parse].
+	ParseLax bool // Use [modfile.ParseLax] to parse go.mod files instead of [modfile.Parse].
+
+	// VersionFixer is a function that can be used to fix version strings in go.mod files.
 	VersionFixer modfile.VersionFixer // Use this version-string fixing function when parsing go.mod files.
 
-	// The following fields are used by LoadEach and LoadEachGomod.
+	// The following fields are used by [LoadEach] and [LoadEachGomod].
 
 	// This is the config to pass to [packages.Load]
 	// when loading packages in [Walker.LoadEach] and [Walker.LoadEachGomod].
 	// If this is the zero config,
 	// a default value of [DefaultLoadConfig] is used.
 	// If this is not the zero config but LoadConfig.Mode is zero,
-	// a default value of [LoadMode] is used.
+	// a default value of [DefaultLoadMode] is used.
 	// The Dir field of the config is set to the directory passed to [Walker.LoadEach] or [Walker.LoadEachGomod].
-	LoadConfig          packages.Config
-	FailOnPackageErrors bool // If true, return an error if any package fails to load.
+	LoadConfig packages.Config
+
+	// FailOnPackageErrors controls whether to return an error if any package fails to load.
+	FailOnPackageErrors bool
 }
 
 var zeroLoadConfig packages.Config
 
-const LoadMode = packages.NeedName | packages.NeedFiles | packages.NeedImports | packages.NeedDeps | packages.NeedTypes | packages.NeedSyntax | packages.NeedTypesInfo | packages.NeedTypesSizes | packages.NeedModule | packages.NeedEmbedFiles | packages.NeedEmbedPatterns
+// DefaultLoadMode is the default value for the Mode field of the [packages.Config] used by [Walker.LoadEach] and [Walker.LoadEachGomod].
+const DefaultLoadMode = packages.NeedName | packages.NeedFiles | packages.NeedImports | packages.NeedDeps | packages.NeedTypes | packages.NeedSyntax | packages.NeedTypesInfo | packages.NeedTypesSizes | packages.NeedModule | packages.NeedEmbedFiles | packages.NeedEmbedPatterns
 
-var DefaultLoadConfig = packages.Config{Mode: LoadMode}
+// DefaultLoadConfig is the default value for the [Walker.LoadConfig] field used by [Walker.LoadEach] and [Walker.LoadEachGomod].
+var DefaultLoadConfig = packages.Config{Mode: DefaultLoadMode}
 
 // Each calls f for each Go module in dir and its subdirectories.
 // A Go module is identified by the presence of a go.mod file.
@@ -152,18 +162,32 @@ func (w *Walker) withGomod(dir, subdir string, f func(string, *modfile.File) err
 	return f(subdir, mf)
 }
 
+// LoadEach calls f once for each Go module in dir and its subdirectories,
+// passing it the directory containing the go.mod file
+// (which will have dir as a prefix)
+// and a slice of [packages.Package] values loaded from that directory
+// using the [packages.Load] function.
 func LoadEach(dir string, f func(string, []*packages.Package) error) error {
 	var w Walker
 	return w.LoadEach(dir, f)
 }
 
+// LoadEach calls f once for each Go module in dir and its subdirectories,
+// passing it the directory containing the go.mod file
+// (which will have dir as a prefix)
+// and a slice of [packages.Package] values loaded from that directory
+// using the [packages.Load] function.
+// You can specify how loading is done by modifying w.LoadConfig.
+// If w.LoadConfig is the zero value, a default value of [DefaultLoadConfig] is used.
+// If w.LoadConfig is not the zero value but LoadConfig.Mode is zero,
+// a default value of [DefaultLoadMode] is used.
 func (w *Walker) LoadEach(dir string, f func(string, []*packages.Package) error) error {
 	conf := w.LoadConfig
 	if isZeroConfig(conf) {
 		conf = DefaultLoadConfig
 	}
 	if conf.Mode == 0 {
-		conf.Mode = LoadMode
+		conf.Mode = DefaultLoadMode
 	}
 	conf.Dir = dir
 
@@ -193,6 +217,7 @@ func isZeroConfig(conf packages.Config) bool {
 	return reflect.DeepEqual(conf, zeroLoadConfig) // Can't use == because packages.Config contains function pointers.
 }
 
+// PackageLoadError is an error type that wraps an error that occurred while loading a package.
 type PackageLoadError struct {
 	PkgPath string
 	Err     error
